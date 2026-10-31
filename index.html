@@ -23,16 +23,26 @@
       <button id="orient" class="btn" type="button" aria-pressed="false">縦向き</button>
       <button id="reset" class="btn" type="button" disabled>全身に戻す</button>
     </div>
-    <button id="export" class="btn primary" type="button" disabled>保存</button>
+    <div class="group">
+      <select id="shrink" aria-label="AIに渡す前の縮小">
+        <option value="1">縮小しない</option>
+        <option value="2">1/2に縮小</option>
+        <option value="3" selected>1/3に縮小（おすすめ）</option>
+        <option value="4">1/4に縮小</option>
+      </select>
+      <button id="enhance" class="btn accent" type="button" disabled>AIで高画質化</button>
+      <button id="export" class="btn primary" type="button" disabled>保存</button>
+    </div>
   </header>
 
   <main id="stage">
     <canvas id="view" aria-label="切り抜きの表示"></canvas>
+    <div id="busy" hidden><div class="panel"><p id="busyText">準備中…</p><progress id="busyBar" max="1" value="0"></progress><button id="cancel" class="btn" type="button">中止</button></div></div>
     <p id="empty">「写真を選ぶ」から画像を選んでください。<br>指でずらす・2本指で拡大縮小できます。</p>
   </main>
 
   <footer>
-    <span id="info"></span>
+    <span><span id="status"></span><br><span id="info"></span></span>
     <label class="check"><input id="guide" type="checkbox" checked> 端が切れる目安の線</label>
   </footer>
 
