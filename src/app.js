@@ -4,6 +4,7 @@ import {
 } from './layout.js';
 import { renderComposite } from './render.js';
 import { setJpegDpi } from './jpeg.js';
+import { aiInputScale } from './tiles.js';
 
 const $ = (id) => document.getElementById(id);
 const view = $('view');
@@ -17,7 +18,14 @@ const state = {
   landscape: false,
   out: outputSize('2L'),
   placement: null,
+  enhanced: null,   // { canvas, rect, key } AI処理後の前景
+  backend: '',
+  busy: false,
 };
+
+// 配置・サイズ・縮小の組み合わせ。これが変わったらAIの結果は使えない
+const placementKey = () => JSON.stringify([state.out, state.placement, $('shrink').value]);
+const currentEnhanced = () => (state.enhanced && state.enhanced.key === placementKey() ? state.enhanced : null);
 
 // ---------- 表示 ----------
 let viewScale = 1; // 書き出しピクセル → 画面ピクセル（CSS px）
@@ -46,7 +54,8 @@ function drawNow() {
   vctx.fillRect(0, 0, view.width, view.height);
   if (!state.src) return;
   vctx.setTransform(k, 0, 0, k, 0, 0);
-  renderComposite(vctx, { src: state.src, img: state.img, out: state.out, placement: state.placement });
+  const e = currentEnhanced();
+  renderComposite(vctx, { src: state.src, fg: e?.canvas, fgRect: e?.rect, img: state.img, out: state.out, placement: state.placement });
   if ($('guide').checked) {
     const b = mmToPx(BLEED_MM);
     vctx.setTransform(k, 0, 0, k, 0, 0);
@@ -66,7 +75,10 @@ function updateInfo() {
   const effDpi = Math.round(300 / mag);
   $('info').textContent =
     `元画像 ${state.img.w}×${state.img.h} ／ 書き出し ${s.label} ${state.out.w}×${state.out.h} ／ ` +
-    `拡大率 ×${mag.toFixed(2)}（実質 ${effDpi}dpi）` + (v ? '' : ' ／ 画像が枠の外です');
+    `拡大率 ×${mag.toFixed(2)}（実質 ${effDpi}dpi）` + (v ? '' : ' ／ 画像が枠の外です') +
+    (state.backend ? ` ／ AI：${state.backend === 'webgpu' ? 'WebGPU' : 'WASM（遅い）'}` : '');
+  $('status').textContent = currentEnhanced() ? 'AI処理済み' : state.enhanced ? '位置や設定が変わりました。もう一度「AIで高画質化」を押してください' : '';
+  $('enhance').disabled = state.busy || !state.src || !v || !!currentEnhanced();
 }
 
 // ---------- 読み込み ----------
@@ -77,6 +89,7 @@ async function loadFile(file) {
   state.img = { w: bmp.width, h: bmp.height };
   state.name = (file.name || 'photo').replace(/\.[^.]+$/, '');
   state.placement = initialPlacement(state.img, state.out);
+  state.enhanced = null;
   $('empty').hidden = true;
   $('export').disabled = false;
   $('reset').disabled = false;
@@ -124,7 +137,7 @@ function startGesture() {
 }
 
 $('stage').addEventListener('pointerdown', (e) => {
-  if (!state.src) return;
+  if (!state.src || state.busy) return;
   $('stage').setPointerCapture(e.pointerId);
   pointers.set(e.pointerId, toOut(e));
   startGesture();
@@ -150,7 +163,7 @@ const endPointer = (e) => { pointers.delete(e.pointerId); startGesture(); if (!p
 $('stage').addEventListener('pointerup', endPointer);
 $('stage').addEventListener('pointercancel', endPointer);
 $('stage').addEventListener('wheel', (e) => {
-  if (!state.src) return;
+  if (!state.src || state.busy) return;
   e.preventDefault();
   const pt = toOut(e);
   state.placement = clampPlacement(zoomAt(state.placement, Math.exp(-e.deltaY * 0.002), pt.x, pt.y), state.img, state.out);
@@ -159,11 +172,81 @@ $('stage').addEventListener('wheel', (e) => {
 // iPad Safari のページ全体のピンチ拡大を止める
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 
+// ---------- AIで高画質化 ----------
+let abort = null;
+
+function showBusy(text, value = 0) {
+  $('busy').hidden = false;
+  $('busyText').textContent = text;
+  $('busyBar').value = value;
+}
+
+/** 書き出し枠に見えている範囲（少し広め）をAIで4倍にし、書き出しの解像度で前景を作る */
+async function enhance() {
+  const { loadUpscaler, upscaleInto } = await import('./upscale.js');
+  const p = state.placement;
+  const v = visibleSourceRect(p, state.img, state.out);
+  if (!v) return;
+  const m = 8; // 周囲の文脈のため、元画像で8pxほど広げる
+  const x0 = Math.max(0, Math.floor(v.x - m)), y0 = Math.max(0, Math.floor(v.y - m));
+  const x1 = Math.min(state.img.w, Math.ceil(v.x + v.w + m)), y1 = Math.min(state.img.h, Math.ceil(v.y + v.h + m));
+  const rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  const key = placementKey();
+
+  const s = aiInputScale(Number($('shrink').value), p.scale);
+  const input = document.createElement('canvas');
+  input.width = Math.max(1, Math.round(rect.w * s));
+  input.height = Math.max(1, Math.round(rect.h * s));
+  const ictx = input.getContext('2d', { willReadFrequently: true });
+  ictx.imageSmoothingEnabled = true;
+  ictx.imageSmoothingQuality = 'high';
+  ictx.drawImage(state.src, rect.x, rect.y, rect.w, rect.h, 0, 0, input.width, input.height);
+
+  const fg = document.createElement('canvas');
+  fg.width = Math.max(1, Math.round(rect.w * p.scale));
+  fg.height = Math.max(1, Math.round(rect.h * p.scale));
+
+  showBusy('AIの準備中…');
+  const up = await loadUpscaler({
+    onProgress: (got, total) => showBusy(`AIデータを読み込み中（初回のみ）… ${(got / 1e6).toFixed(0)}${total ? ` / ${(total / 1e6).toFixed(0)}` : ''} MB`, total ? got / total : 0),
+  });
+  state.backend = up.backend;
+  const t0 = performance.now();
+  showBusy('AIで高画質化しています…', 0);
+  await upscaleInto(up, input, fg.getContext('2d'), { x: 0, y: 0, w: fg.width, h: fg.height }, {
+    signal: abort.signal,
+    onTile: (i, n) => {
+      const sec = (performance.now() - t0) / 1000;
+      const left = Math.round((sec / i) * (n - i));
+      showBusy(`AIで高画質化しています… ${i} / ${n}（残り約${left}秒）`, i / n);
+    },
+  });
+  state.enhanced = { canvas: fg, rect, key, seconds: (performance.now() - t0) / 1000 };
+}
+
+$('enhance').addEventListener('click', async () => {
+  if (state.busy) return;
+  state.busy = true; abort = new AbortController();
+  $('enhance').disabled = true; $('export').disabled = true;
+  try {
+    await enhance();
+  } catch (err) {
+    if (err.name !== 'AbortError') { console.error(err); alert(`AI処理に失敗しました：${err.message}`); }
+  } finally {
+    state.busy = false; abort = null;
+    $('busy').hidden = true; $('export').disabled = false;
+    draw();
+  }
+});
+$('cancel').addEventListener('click', () => abort?.abort());
+$('shrink').addEventListener('change', draw);
+
 // ---------- 書き出し ----------
 async function exportJpeg() {
   const c = document.createElement('canvas');
   c.width = state.out.w; c.height = state.out.h;
-  renderComposite(c.getContext('2d'), { src: state.src, img: state.img, out: state.out, placement: state.placement });
+  const e = currentEnhanced();
+  renderComposite(c.getContext('2d'), { src: state.src, fg: e?.canvas, fgRect: e?.rect, img: state.img, out: state.out, placement: state.placement });
   const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.95));
   const bytes = setJpegDpi(new Uint8Array(await blob.arrayBuffer()), 300);
   const name = `${state.name}_${state.sizeKey}.jpg`;
@@ -189,14 +272,18 @@ $('export').addEventListener('click', async () => {
   }
 });
 
-$('file').addEventListener('change', (e) => { const f = e.target.files?.[0]; if (f) loadFile(f); e.target.value = ''; });
-$('size').addEventListener('change', (e) => { state.sizeKey = e.target.value; changeOutput(); });
-$('orient').addEventListener('click', () => { state.landscape = !state.landscape; changeOutput(); });
-$('reset').addEventListener('click', () => { state.placement = initialPlacement(state.img, state.out); draw(); });
+$('file').addEventListener('change', (e) => {
+  if (state.busy) { e.target.value = ''; return; } const f = e.target.files?.[0]; if (f) loadFile(f); e.target.value = ''; });
+$('size').addEventListener('change', (e) => {
+  if (state.busy) { e.target.value = state.sizeKey; return; } state.sizeKey = e.target.value; changeOutput(); });
+$('orient').addEventListener('click', () => {
+  if (state.busy) return; state.landscape = !state.landscape; changeOutput(); });
+$('reset').addEventListener('click', () => {
+  if (state.busy) return; state.placement = initialPlacement(state.img, state.out); draw(); });
 $('guide').addEventListener('change', draw);
 window.addEventListener('resize', layoutView);
 
 // テスト用
-window.__app = { state, exportJpeg, loadFile };
+window.__app = { state, exportJpeg, loadFile, currentEnhanced };
 
 layoutView();

@@ -26,16 +26,23 @@ export function drawBlurredBackground(ctx, src, img, out) {
 
 /**
  * 書き出し全体を描く。
- * fg: 前景に使う画像（AI処理後の画像を渡せるように img とは別にする）。
- *     fg は元画像と同じ範囲を写した、任意の解像度の画像でよい。
+ * fg: 前景に使う画像（AI処理後の画像）。省略すると元画像をそのまま使う。
+ * fgRect: fg が写している元画像の範囲（元画像の座標）。
  */
-export function renderComposite(ctx, { src, fg = src, img, out, placement }) {
+export function renderComposite(ctx, { src, fg = null, fgRect = null, img, out, placement }) {
   ctx.clearRect(0, 0, out.w, out.h);
   drawBlurredBackground(ctx, src, img, out);
   const r = drawRect(placement, img);
   ctx.save();
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(fg, r.x, r.y, r.w, r.h);
+  if (fg && fgRect) {
+    // 元画像を下に敷いてから（AIで処理していない端の部分のため）、AI処理後の画像を重ねる
+    ctx.drawImage(src, r.x, r.y, r.w, r.h);
+    const s = placement.scale;
+    ctx.drawImage(fg, r.x + fgRect.x * s, r.y + fgRect.y * s, fgRect.w * s, fgRect.h * s);
+  } else {
+    ctx.drawImage(src, r.x, r.y, r.w, r.h);
+  }
   ctx.restore();
 }

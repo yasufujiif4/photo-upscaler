@@ -1,0 +1,1 @@
+onnxruntime-web 1.31.1（npm）の dist の一部。MIT License（https://github.com/microsoft/onnxruntime/blob/main/LICENSE）
