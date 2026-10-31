@@ -6,6 +6,7 @@ ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardw
 
 const CACHE_NAME = 'photo-upscaler-models-v1';
 let session = null;
+let debugZero = false; // 試験用：エラーにならずに 0 だけ返る（iPad で起きた状況）
 let debugGpuFail = 0; // 試験用：WebGPU の失敗をまねる（この大きさを超えるタイルは失敗）
 
 /** モデルを読み込む（2回目以降は端末に保存したものを使う） */
@@ -62,11 +63,17 @@ self.onmessage = async ({ data: msg }) => {
   try {
     if (msg.type === 'load') {
       const info = await load(msg);
-      // 試験用（?debug=gpufail / gpufailall）：WASM で動かしつつ「WebGPU で大きなタイルが失敗する」ふりをする
-      debugGpuFail = msg.preferWasm ? 0 : { gpufail: 100, gpufailall: 1 }[msg.debug] || 0;
+      // 試験用（?debug=gpufail / gpufailall / gpuzero）：WASM で動かしつつ「WebGPU で大きなタイルが失敗する」ふりをする
+      debugGpuFail = msg.preferWasm ? 0 : { gpufail: 100, gpufailall: 1, gpuzero: 1 }[msg.debug] || 0;
+      debugZero = msg.debug === 'gpuzero' && !msg.preferWasm;
       if (debugGpuFail) Object.assign(info, { backend: 'webgpu', gpuLimit: 512 * 1024 * 1024 });
       postMessage({ type: 'ready', ...info });
     } else if (msg.type === 'run') {
+      if (debugZero) {
+        const z = new Float32Array(3 * msg.w * msg.h * 16);
+        postMessage({ type: 'result', id: msg.id, data: z, w: msg.w * 4, h: msg.h * 4 }, [z.buffer]);
+        return;
+      }
       if (debugGpuFail && Math.max(msg.w, msg.h) > debugGpuFail) throw new Error('simulated: map async was not successful');
       const x = new ort.Tensor('float32', msg.data, [1, 3, msg.h, msg.w]);
       const out = await session.run({ input: x });

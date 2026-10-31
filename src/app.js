@@ -12,6 +12,7 @@ const vctx = view.getContext('2d');
 
 const state = {
   src: null,        // ImageBitmap
+  file: null,       // 選んだファイル（元の写真が消えたときに読み込み直すため）
   img: null,        // { w, h }
   name: 'photo',
   sizeKey: '2L',
@@ -76,7 +77,7 @@ function updateInfo() {
   $('info').textContent =
     `元画像 ${state.img.w}×${state.img.h} ／ 書き出し ${s.label} ${state.out.w}×${state.out.h} ／ ` +
     `拡大率 ×${mag.toFixed(2)}（実質 ${effDpi}dpi）` + (v ? '' : ' ／ 画像が枠の外です') +
-    (state.backend ? ` ／ AI：${state.backend === 'webgpu' ? 'WebGPU' : 'WASM（遅い）'}（${state.tile}）` : '');
+    (state.backend ? ` ／ AI：${state.backend === 'webgpu' ? 'GPU' : `CPU×${self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1}`}（${state.tile}）` : '');
   $('status').textContent = currentEnhanced() ? 'AI処理済み' : state.enhanced ? '位置や設定が変わりました。もう一度「AIで高画質化」を押してください' : '';
   $('enhance').disabled = state.busy || !state.src || !v || !!currentEnhanced();
 }
@@ -86,6 +87,7 @@ async function loadFile(file) {
   const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
   state.src?.close?.();
   state.src = bmp;
+  state.file = file;
   state.img = { w: bmp.width, h: bmp.height };
   state.name = (file.name || 'photo').replace(/\.[^.]+$/, '');
   state.placement = initialPlacement(state.img, state.out);
@@ -94,6 +96,21 @@ async function loadFile(file) {
   $('export').disabled = false;
   $('reset').disabled = false;
   draw();
+}
+
+/** 元の写真が消えていたら（iPad で GPU 側が落ちたときなど）、ファイルから読み込み直す */
+async function ensureSrc() {
+  if (!state.src || !state.file) return;
+  const c = document.createElement('canvas');
+  c.width = 8; c.height = 8;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(state.src, 0, 0, 8, 8);
+  const d = ctx.getImageData(0, 0, 8, 8).data;
+  let alive = false;
+  for (let i = 3; i < d.length; i += 4) if (d[i] !== 0) { alive = true; break; }
+  if (alive) return;
+  console.warn('source image was lost; reloading from file');
+  state.src = await createImageBitmap(state.file, { imageOrientation: 'from-image' });
 }
 
 // ---------- サイズ・向き ----------
@@ -184,6 +201,7 @@ function showBusy(text, value = 0) {
 /** 書き出し枠に見えている範囲（少し広め）をAIで4倍にし、書き出しの解像度で前景を作る */
 async function enhance() {
   const { upscaleRobust } = await import('./upscale.js');
+  await ensureSrc();
   const p = state.placement;
   const v = visibleSourceRect(p, state.img, state.out);
   if (!v) return;
@@ -202,13 +220,15 @@ async function enhance() {
   ictx.imageSmoothingQuality = 'high';
   ictx.drawImage(state.src, rect.x, rect.y, rect.w, rect.h, 0, 0, input.width, input.height);
 
+  // willReadFrequently のキャンバスは CPU 側に置かれるので、GPU 側が落ちても消えない
   const fg = document.createElement('canvas');
   fg.width = Math.max(1, Math.round(rect.w * p.scale));
   fg.height = Math.max(1, Math.round(rect.h * p.scale));
 
   showBusy('AIの準備中…');
   let t0 = 0; let lastI = 0;
-  const res = await upscaleRobust(input, fg.getContext('2d'), { x: 0, y: 0, w: fg.width, h: fg.height }, {
+  const res = await upscaleRobust(input, fg.getContext('2d', { willReadFrequently: true }), { x: 0, y: 0, w: fg.width, h: fg.height }, {
+    mode: $('engine').value,
     signal: abort.signal,
     onProgress: (got, total) => showBusy(`AIデータを読み込み中（初回のみ）… ${(got / 1e6).toFixed(0)}${total ? ` / ${(total / 1e6).toFixed(0)}` : ''} MB`, total ? got / total : 0),
     onStatus: (text) => { showBusy(text, 0); t0 = 0; },
@@ -235,12 +255,19 @@ $('enhance').addEventListener('click', async () => {
     if (err.name !== 'AbortError') { console.error(err); alert(`AI処理に失敗しました：${err.message}`); }
   } finally {
     state.busy = false; abort = null;
+    await ensureSrc().catch(() => {});
     $('busy').hidden = true; $('export').disabled = false;
     draw();
   }
 });
 $('cancel').addEventListener('click', () => abort?.abort());
 $('shrink').addEventListener('change', draw);
+// 処理の方法（自動／GPU／CPU）は端末に覚えておく
+try { $('engine').value = localStorage.getItem('photo-upscaler-engine') || 'auto'; } catch { /* なし */ }
+$('engine').addEventListener('change', async (e) => {
+  try { localStorage.setItem('photo-upscaler-engine', e.target.value); } catch { /* なし */ }
+  if (e.target.value === 'gpu') (await import('./upscale.js')).forgetLearned(); // GPU をもう一度試す
+});
 
 // ---------- 書き出し ----------
 async function exportJpeg() {

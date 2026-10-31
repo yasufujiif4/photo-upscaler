@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planTiles, aiInputScale, rgbaToChw, chwToRgba, peakBufferBytes, pickTileSize } from '../src/tiles.js';
+import { planTiles, aiInputScale, rgbaToChw, chwToRgba, peakBufferBytes, pickTileSize, isBadOutput } from '../src/tiles.js';
 
 test('タイルが隙間なく重ならずに全体を覆う', () => {
   const w = 600, h = 333;
@@ -41,4 +41,13 @@ test('WebGPU の上限に収まるタイルの大きさ', () => {
   for (const lim of [128, 256, 1024].map((m) => m * 1024 * 1024)) {
     assert.ok(peakBufferBytes(pickTileSize(lim), 16) <= lim);
   }
+});
+
+test('AIの出力がおかしいかどうか', () => {
+  assert.equal(isBadOutput(new Float32Array(1000)), true);                 // 真っ黒
+  assert.equal(isBadOutput(new Float32Array(1000).fill(NaN)), true);        // 計算不能
+  const ok = new Float32Array(1000).map((_, i) => (i % 10) / 10);
+  assert.equal(isBadOutput(ok), false);
+  const dark = new Float32Array(1000).fill(0.05);                           // 暗い写真は正常扱い
+  assert.equal(isBadOutput(dark), false);
 });
