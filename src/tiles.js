@@ -74,3 +74,18 @@ export function pickTileSize(limitBytes, pad = 16, candidates = [256, 192, 160, 
   for (const t of candidates) if (peakBufferBytes(t, pad) <= limitBytes * 0.9) return t;
   return candidates[candidates.length - 1];
 }
+
+/**
+ * AIの出力がおかしくないか（計算不能な値がある／ほぼ真っ黒）。
+ * iPad の WebGPU が途中で落ちると、エラーにならずに 0 だけが返ることがあるため。
+ */
+export function isBadOutput(chw) {
+  let max = 0;
+  const step = Math.max(1, Math.floor(chw.length / 20000));
+  for (let i = 0; i < chw.length; i += step) {
+    const v = chw[i];
+    if (!(v === v) || v === Infinity || v === -Infinity) return true; // NaN / 無限大
+    if (v > max) max = v;
+  }
+  return max < 2 / 255;
+}

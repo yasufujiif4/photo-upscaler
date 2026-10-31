@@ -30,3 +30,4 @@ python tools/export_realesrgan_onnx.py RealESRGAN_x4plus.pth models/realesrgan-x
 ## 使っているもの
 - Real-ESRGAN（BSD-3-Clause）https://github.com/xinntao/Real-ESRGAN
 - ONNX Runtime Web（MIT）https://github.com/microsoft/onnxruntime
+- coi-serviceworker（MIT）https://github.com/gzuidhof/coi-serviceworker

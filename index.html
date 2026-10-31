@@ -6,6 +6,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="高画質化">
   <title>写真の高画質化（プリント用）</title>
+  <!-- CPU（WASM）で複数のコアを使うため、ページを cross-origin isolated にする（GitHub Pages ではヘッダーを付けられないので Service Worker で付ける） -->
+  <script src="coi-serviceworker.js"></script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -29,6 +31,11 @@
         <option value="2">1/2に縮小</option>
         <option value="3" selected>1/3に縮小（おすすめ）</option>
         <option value="4">1/4に縮小</option>
+      </select>
+      <select id="engine" aria-label="AIの処理の方法">
+        <option value="auto" selected>処理：自動</option>
+        <option value="gpu">処理：GPU（速い）</option>
+        <option value="cpu">処理：CPU（確実・遅い）</option>
       </select>
       <button id="enhance" class="btn accent" type="button" disabled>AIで高画質化</button>
       <button id="export" class="btn primary" type="button" disabled>保存</button>
