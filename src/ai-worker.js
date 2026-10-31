@@ -6,6 +6,7 @@ ort.env.wasm.numThreads = self.crossOriginIsolated ? Math.min(4, navigator.hardw
 
 const CACHE_NAME = 'photo-upscaler-models-v1';
 let session = null;
+let debugGpuFail = 0; // 試験用：WebGPU の失敗をまねる（この大きさを超えるタイルは失敗）
 
 /** モデルを読み込む（2回目以降は端末に保存したものを使う） */
 async function fetchModel(url) {
@@ -30,6 +31,20 @@ async function fetchModel(url) {
   return buf;
 }
 
+/** WebGPU で1つのデータに使える上限（バイト） */
+async function gpuLimitBytes() {
+  let lim = null;
+  try {
+    const dev = await ort.env.webgpu?.device;
+    if (dev?.limits) lim = dev.limits;
+  } catch { /* 取れない版 */ }
+  if (!lim) {
+    try { lim = (await navigator.gpu.requestAdapter())?.limits; } catch { /* なし */ }
+  }
+  if (!lim) return 128 * 1024 * 1024;
+  return Math.min(Number(lim.maxStorageBufferBindingSize) || Infinity, Number(lim.maxBufferSize) || Infinity);
+}
+
 async function load({ url, preferWasm }) {
   const bytes = await fetchModel(url);
   const order = !preferWasm && 'gpu' in navigator ? ['webgpu', 'wasm'] : ['wasm'];
@@ -37,7 +52,7 @@ async function load({ url, preferWasm }) {
   for (const ep of order) {
     try {
       session = await ort.InferenceSession.create(bytes, { executionProviders: [ep], graphOptimizationLevel: 'all' });
-      return ep;
+      return { backend: ep, gpuLimit: ep === 'webgpu' ? await gpuLimitBytes() : 0 };
     } catch (e) { lastErr = e; }
   }
   throw lastErr;
@@ -46,9 +61,13 @@ async function load({ url, preferWasm }) {
 self.onmessage = async ({ data: msg }) => {
   try {
     if (msg.type === 'load') {
-      const backend = await load(msg);
-      postMessage({ type: 'ready', backend });
+      const info = await load(msg);
+      // 試験用（?debug=gpufail / gpufailall）：WASM で動かしつつ「WebGPU で大きなタイルが失敗する」ふりをする
+      debugGpuFail = msg.preferWasm ? 0 : { gpufail: 100, gpufailall: 1 }[msg.debug] || 0;
+      if (debugGpuFail) Object.assign(info, { backend: 'webgpu', gpuLimit: 512 * 1024 * 1024 });
+      postMessage({ type: 'ready', ...info });
     } else if (msg.type === 'run') {
+      if (debugGpuFail && Math.max(msg.w, msg.h) > debugGpuFail) throw new Error('simulated: map async was not successful');
       const x = new ort.Tensor('float32', msg.data, [1, 3, msg.h, msg.w]);
       const out = await session.run({ input: x });
       const y = out.output;

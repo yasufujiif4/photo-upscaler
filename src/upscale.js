@@ -1,16 +1,26 @@
 // Real-ESRGAN x4plus（ONNX Runtime Web、WebGPU／だめなら WASM）を別スレッドで動かす
-import { planTiles, rgbaToChw, chwToRgba } from './tiles.js';
+import { planTiles, rgbaToChw, chwToRgba, pickTileSize } from './tiles.js';
 
 export const MODEL_URL = new URL('../models/realesrgan-x4plus.onnx', import.meta.url).href;
 const SCALE = 4;
 
 let upscalerPromise = null;
+let worker = null;
+// 一度うまくいかなかった設定は覚えておき、次からは最初からそちらを使う
+const learned = { forceWasm: false, tile: 0 };
 
-/** AIを準備する（1回だけ）。返り値 { backend, run(chw, w, h) } */
+/** AIを捨てる（GPUが使えなくなったときに作り直すため） */
+export function resetUpscaler() {
+  worker?.terminate();
+  worker = null;
+  upscalerPromise = null;
+}
+
+/** AIを準備する（1回だけ）。返り値 { backend, gpuLimit, run(chw, w, h) } */
 export function loadUpscaler({ onProgress, preferWasm = false } = {}) {
   if (!upscalerPromise) {
     upscalerPromise = new Promise((resolve, reject) => {
-      const worker = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
+      worker = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
       const pending = new Map();
       let nextId = 1;
       const run = (data, w, h) => new Promise((res, rej) => {
@@ -20,7 +30,7 @@ export function loadUpscaler({ onProgress, preferWasm = false } = {}) {
       });
       worker.onmessage = ({ data: m }) => {
         if (m.type === 'progress') onProgress?.(m.got, m.total);
-        else if (m.type === 'ready') resolve({ backend: m.backend, run });
+        else if (m.type === 'ready') resolve({ backend: m.backend, gpuLimit: m.gpuLimit, run });
         else if (m.type === 'result') { pending.get(m.id)?.res(m); pending.delete(m.id); }
         else if (m.type === 'error') {
           if (m.id && pending.has(m.id)) { pending.get(m.id).rej(new Error(m.message)); pending.delete(m.id); }
@@ -28,7 +38,8 @@ export function loadUpscaler({ onProgress, preferWasm = false } = {}) {
         }
       };
       worker.onerror = (e) => reject(new Error(e.message || 'AIの準備に失敗しました'));
-      worker.postMessage({ type: 'load', url: MODEL_URL, preferWasm });
+      const debug = new URLSearchParams(location.search).get('debug');
+      worker.postMessage({ type: 'load', url: MODEL_URL, preferWasm: preferWasm || learned.forceWasm, debug });
     });
     upscalerPromise.catch(() => { upscalerPromise = null; });
   }
@@ -66,5 +77,40 @@ export async function upscaleInto(up, input, dest, destRect, { tile = 256, pad =
     }
   } finally {
     dest.restore();
+  }
+}
+
+/**
+ * 失敗しても自動でやり直す版。
+ * WebGPU：上限に収まるタイルで始め、失敗したらタイルを半分にしてやり直す。
+ * それでも失敗したら WASM（遅いが確実）でやり直す。
+ * 返り値 { backend, tile }
+ */
+export async function upscaleRobust(input, dest, destRect, { onProgress, onStatus, onTile, signal } = {}) {
+  let up = await loadUpscaler({ onProgress });
+  const startTile = () => (up.backend === 'webgpu' ? learned.tile || pickTileSize(up.gpuLimit) : 256);
+  let tile = startTile();
+  for (;;) {
+    try {
+      await upscaleInto(up, input, dest, destRect, { tile, onTile, signal });
+      if (up.backend === 'webgpu') learned.tile = tile;
+      return { backend: up.backend, tile };
+    } catch (e) {
+      if (e.name === 'AbortError' || up.backend !== 'webgpu') throw e;
+      console.warn('WebGPU failed', tile, e);
+      resetUpscaler(); // GPUが使えなくなっていることがあるので作り直す
+      if (tile > 48) {
+        tile = Math.max(48, Math.floor(tile / 2));
+        learned.tile = tile;
+        onStatus?.(`GPUの処理に失敗したため、もっと小さく分けてやり直します…`);
+        up = await loadUpscaler({ onProgress });
+        if (up.backend !== 'webgpu') tile = startTile();
+      } else {
+        learned.forceWasm = true;
+        onStatus?.('GPUでの処理をやめ、CPU（WASM）でやり直します。時間がかかります…');
+        up = await loadUpscaler({ onProgress });
+        tile = 256;
+      }
+    }
   }
 }
