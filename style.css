@@ -31,3 +31,6 @@ footer { justify-content: space-between; font-size: 15px; color: #c7c7cc; }
 #busy p { margin: 0; }
 #busy progress { width: 100%; height: 10px; }
 #status { color: #ffd60a; }
+
+.slider input[type=range] { width: 160px; height: 44px; }
+.slider output { min-width: 2em; color: #ffd60a; }
