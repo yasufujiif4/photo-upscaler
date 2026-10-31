@@ -1,24 +1,40 @@
 // 書き出し画像の描画（ぼかした背景＋前景）
 import { coverScale, drawRect } from './layout.js';
+import { blurRGBA } from './blur.js';
 
-/** 縮小→拡大でぼかした背景（ctx.filter に頼らず Safari でも同じ見た目にする） */
+// 元の写真ごとに、ぼかした背景を覚えておく（指で動かすたびに作り直さない）
+const bgCache = new WeakMap();
+
+/**
+ * ぼかした背景。小さく縮小してから JS でしっかりぼかし、拡大する
+ * （縮小→拡大だけだと四角いマス目が見えるため。ctx.filter は Safari の版によって使えないので使わない）。
+ */
 export function drawBlurredBackground(ctx, src, img, out) {
   const s = coverScale(img, out);
   const w = img.w * s, h = img.h * s;
-  const tiny = document.createElement('canvas');
-  const tw = 32;
-  tiny.width = tw;
-  tiny.height = Math.max(1, Math.round((tw * out.h) / out.w));
-  const tctx = tiny.getContext('2d');
-  tctx.imageSmoothingEnabled = true;
-  tctx.imageSmoothingQuality = 'high';
-  const k = tiny.width / out.w;
-  tctx.drawImage(src, (out.w - w) / 2 * k, (out.h - h) / 2 * k, w * k, h * k);
+  const tw = 96;
+  const th = Math.max(1, Math.round((tw * out.h) / out.w));
+  const key = `${tw}x${th}|${img.w}x${img.h}|${out.w}x${out.h}`;
+  let small = bgCache.get(src);
+  if (!small || small.key !== key) {
+    const c = document.createElement('canvas');
+    c.width = tw; c.height = th;
+    const cctx = c.getContext('2d', { willReadFrequently: true });
+    cctx.imageSmoothingEnabled = true;
+    cctx.imageSmoothingQuality = 'high';
+    const k = tw / out.w;
+    cctx.drawImage(src, ((out.w - w) / 2) * k, ((out.h - h) / 2) * k, w * k, h * k);
+    const d = cctx.getImageData(0, 0, tw, th);
+    d.data.set(blurRGBA(d.data, tw, th, 4));
+    cctx.putImageData(d, 0, 0);
+    small = { key, canvas: c };
+    bgCache.set(src, small);
+  }
   ctx.save();
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(tiny, 0, 0, out.w, out.h);
-  // 前景を目立たせるため、少しだけ明るくして彩度を落とした印象にする
+  ctx.drawImage(small.canvas, 0, 0, out.w, out.h);
+  // 前景を目立たせるため、少しだけ明るくする
   ctx.fillStyle = 'rgba(255,255,255,0.12)';
   ctx.fillRect(0, 0, out.w, out.h);
   ctx.restore();
