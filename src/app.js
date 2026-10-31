@@ -1,0 +1,202 @@
+import {
+  PRINT_SIZES, BLEED_MM, mmToPx, outputSize, initialPlacement, clampPlacement, zoomAt,
+  visibleSourceRect,
+} from './layout.js';
+import { renderComposite } from './render.js';
+import { setJpegDpi } from './jpeg.js';
+
+const $ = (id) => document.getElementById(id);
+const view = $('view');
+const vctx = view.getContext('2d');
+
+const state = {
+  src: null,        // ImageBitmap
+  img: null,        // { w, h }
+  name: 'photo',
+  sizeKey: '2L',
+  landscape: false,
+  out: outputSize('2L'),
+  placement: null,
+};
+
+// ---------- 表示 ----------
+let viewScale = 1; // 書き出しピクセル → 画面ピクセル（CSS px）
+
+function layoutView() {
+  const stage = $('stage').getBoundingClientRect();
+  const pad = 16;
+  viewScale = Math.min((stage.width - pad * 2) / state.out.w, (stage.height - pad * 2) / state.out.h);
+  const dpr = window.devicePixelRatio || 1;
+  const cw = Math.round(state.out.w * viewScale), ch = Math.round(state.out.h * viewScale);
+  view.style.width = `${cw}px`; view.style.height = `${ch}px`;
+  view.width = Math.round(cw * dpr); view.height = Math.round(ch * dpr);
+  draw();
+}
+
+let raf = 0;
+function draw() {
+  if (raf) return;
+  raf = requestAnimationFrame(() => { raf = 0; drawNow(); });
+}
+
+function drawNow() {
+  const k = view.width / state.out.w;
+  vctx.setTransform(1, 0, 0, 1, 0, 0);
+  vctx.fillStyle = '#fff';
+  vctx.fillRect(0, 0, view.width, view.height);
+  if (!state.src) return;
+  vctx.setTransform(k, 0, 0, k, 0, 0);
+  renderComposite(vctx, { src: state.src, img: state.img, out: state.out, placement: state.placement });
+  if ($('guide').checked) {
+    const b = mmToPx(BLEED_MM);
+    vctx.setTransform(k, 0, 0, k, 0, 0);
+    vctx.strokeStyle = 'rgba(255, 59, 48, 0.9)';
+    vctx.lineWidth = 2 / k;
+    vctx.setLineDash([10 / k, 8 / k]);
+    vctx.strokeRect(b, b, state.out.w - 2 * b, state.out.h - 2 * b);
+    vctx.setLineDash([]);
+  }
+  updateInfo();
+}
+
+function updateInfo() {
+  const v = visibleSourceRect(state.placement, state.img, state.out);
+  const s = PRINT_SIZES[state.sizeKey];
+  const mag = state.placement.scale;
+  const effDpi = Math.round(300 / mag);
+  $('info').textContent =
+    `元画像 ${state.img.w}×${state.img.h} ／ 書き出し ${s.label} ${state.out.w}×${state.out.h} ／ ` +
+    `拡大率 ×${mag.toFixed(2)}（実質 ${effDpi}dpi）` + (v ? '' : ' ／ 画像が枠の外です');
+}
+
+// ---------- 読み込み ----------
+async function loadFile(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  state.src?.close?.();
+  state.src = bmp;
+  state.img = { w: bmp.width, h: bmp.height };
+  state.name = (file.name || 'photo').replace(/\.[^.]+$/, '');
+  state.placement = initialPlacement(state.img, state.out);
+  $('empty').hidden = true;
+  $('export').disabled = false;
+  $('reset').disabled = false;
+  draw();
+}
+
+// ---------- サイズ・向き ----------
+function changeOutput() {
+  const prev = state.out;
+  state.out = outputSize(state.sizeKey, state.landscape);
+  $('orient').textContent = state.landscape ? '横向き' : '縦向き';
+  $('orient').setAttribute('aria-pressed', String(state.landscape));
+  if (state.src) {
+    // 相対位置を保ったまま、全身が入る倍率を基準に置き直す
+    const rel = { x: state.placement.cx / prev.w, y: state.placement.cy / prev.h };
+    const base = initialPlacement(state.img, prev).scale;
+    const ratio = state.placement.scale / base;
+    const p = initialPlacement(state.img, state.out);
+    state.placement = clampPlacement(
+      { scale: p.scale * ratio, cx: rel.x * state.out.w, cy: rel.y * state.out.h }, state.img, state.out);
+  }
+  layoutView();
+}
+
+// ---------- 指での操作 ----------
+const pointers = new Map();
+let gesture = null;
+
+function toOut(e) {
+  const r = view.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / viewScale, y: (e.clientY - r.top) / viewScale };
+}
+
+function startGesture() {
+  const pts = [...pointers.values()];
+  if (pts.length === 1) {
+    gesture = { kind: 'pan', start: pts[0], p0: { ...state.placement } };
+  } else if (pts.length >= 2) {
+    const [a, b] = pts;
+    gesture = {
+      kind: 'pinch', p0: { ...state.placement },
+      mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, dist: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+    };
+  }
+}
+
+$('stage').addEventListener('pointerdown', (e) => {
+  if (!state.src) return;
+  $('stage').setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, toOut(e));
+  startGesture();
+});
+$('stage').addEventListener('pointermove', (e) => {
+  if (!pointers.has(e.pointerId) || !gesture) return;
+  pointers.set(e.pointerId, toOut(e));
+  const pts = [...pointers.values()];
+  let p;
+  if (gesture.kind === 'pan') {
+    p = { ...gesture.p0, cx: gesture.p0.cx + pts[0].x - gesture.start.x, cy: gesture.p0.cy + pts[0].y - gesture.start.y };
+  } else {
+    const [a, b] = pts;
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const f = Math.hypot(a.x - b.x, a.y - b.y) / gesture.dist;
+    p = zoomAt(gesture.p0, f, gesture.mid.x, gesture.mid.y);
+    p.cx += mid.x - gesture.mid.x; p.cy += mid.y - gesture.mid.y;
+  }
+  state.placement = clampPlacement(p, state.img, state.out);
+  draw();
+});
+const endPointer = (e) => { pointers.delete(e.pointerId); startGesture(); if (!pointers.size) gesture = null; };
+$('stage').addEventListener('pointerup', endPointer);
+$('stage').addEventListener('pointercancel', endPointer);
+$('stage').addEventListener('wheel', (e) => {
+  if (!state.src) return;
+  e.preventDefault();
+  const pt = toOut(e);
+  state.placement = clampPlacement(zoomAt(state.placement, Math.exp(-e.deltaY * 0.002), pt.x, pt.y), state.img, state.out);
+  draw();
+}, { passive: false });
+// iPad Safari のページ全体のピンチ拡大を止める
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+
+// ---------- 書き出し ----------
+async function exportJpeg() {
+  const c = document.createElement('canvas');
+  c.width = state.out.w; c.height = state.out.h;
+  renderComposite(c.getContext('2d'), { src: state.src, img: state.img, out: state.out, placement: state.placement });
+  const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.95));
+  const bytes = setJpegDpi(new Uint8Array(await blob.arrayBuffer()), 300);
+  const name = `${state.name}_${state.sizeKey}.jpg`;
+  return new File([bytes], name, { type: 'image/jpeg' });
+}
+
+$('export').addEventListener('click', async () => {
+  $('export').disabled = true;
+  try {
+    const file = await exportJpeg();
+    // iPad では共有シートの「画像を保存」で写真アプリへ保存できる
+    if (navigator.canShare?.({ files: [file] })) {
+      try { await navigator.share({ files: [file] }); } catch (err) { if (err.name !== 'AbortError') throw err; }
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(file); a.download = file.name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+    }
+  } catch (err) {
+    alert(`保存できませんでした：${err.message}`);
+  } finally {
+    $('export').disabled = false;
+  }
+});
+
+$('file').addEventListener('change', (e) => { const f = e.target.files?.[0]; if (f) loadFile(f); e.target.value = ''; });
+$('size').addEventListener('change', (e) => { state.sizeKey = e.target.value; changeOutput(); });
+$('orient').addEventListener('click', () => { state.landscape = !state.landscape; changeOutput(); });
+$('reset').addEventListener('click', () => { state.placement = initialPlacement(state.img, state.out); draw(); });
+$('guide').addEventListener('change', draw);
+window.addEventListener('resize', layoutView);
+
+// テスト用
+window.__app = { state, exportJpeg, loadFile };
+
+layoutView();
