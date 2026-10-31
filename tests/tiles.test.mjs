@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planTiles, aiInputScale, rgbaToChw, chwToRgba } from '../src/tiles.js';
+import { planTiles, aiInputScale, rgbaToChw, chwToRgba, peakBufferBytes, pickTileSize } from '../src/tiles.js';
 
 test('タイルが隙間なく重ならずに全体を覆う', () => {
   const w = 600, h = 333;
@@ -28,5 +28,17 @@ test('RGBA ⇔ CHW の往復', () => {
   const back = chwToRgba(chw, 2, 2, { x: 0, y: 0, w: 2, h: 2 });
   for (let yy = 0; yy < 2; yy++) for (let xx = 0; xx < 2; xx++) for (let c = 0; c < 4; c++) {
     assert.equal(back[(yy * 2 + xx) * 4 + c], rgba[(yy * w + xx + 1) * 4 + c]);
+  }
+});
+
+test('WebGPU の上限に収まるタイルの大きさ', () => {
+  // 256＋のりしろ16 → 1152四方×64層 ≒ 340MB（iPad で失敗した大きさ）
+  assert.equal(peakBufferBytes(256, 16), 1152 * 1152 * 64 * 4);
+  assert.equal(pickTileSize(128 * 1024 * 1024), 128);   // 128MiB
+  assert.equal(pickTileSize(256 * 1024 * 1024), 192);   // 256MiB
+  assert.equal(pickTileSize(4 * 1024 ** 3), 256);        // 上限が大きい
+  assert.equal(pickTileSize(1), 48);                      // どれも収まらない
+  for (const lim of [128, 256, 1024].map((m) => m * 1024 * 1024)) {
+    assert.ok(peakBufferBytes(pickTileSize(lim), 16) <= lim);
   }
 });

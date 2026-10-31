@@ -76,7 +76,7 @@ function updateInfo() {
   $('info').textContent =
     `元画像 ${state.img.w}×${state.img.h} ／ 書き出し ${s.label} ${state.out.w}×${state.out.h} ／ ` +
     `拡大率 ×${mag.toFixed(2)}（実質 ${effDpi}dpi）` + (v ? '' : ' ／ 画像が枠の外です') +
-    (state.backend ? ` ／ AI：${state.backend === 'webgpu' ? 'WebGPU' : 'WASM（遅い）'}` : '');
+    (state.backend ? ` ／ AI：${state.backend === 'webgpu' ? 'WebGPU' : 'WASM（遅い）'}（${state.tile}）` : '');
   $('status').textContent = currentEnhanced() ? 'AI処理済み' : state.enhanced ? '位置や設定が変わりました。もう一度「AIで高画質化」を押してください' : '';
   $('enhance').disabled = state.busy || !state.src || !v || !!currentEnhanced();
 }
@@ -183,7 +183,7 @@ function showBusy(text, value = 0) {
 
 /** 書き出し枠に見えている範囲（少し広め）をAIで4倍にし、書き出しの解像度で前景を作る */
 async function enhance() {
-  const { loadUpscaler, upscaleInto } = await import('./upscale.js');
+  const { upscaleRobust } = await import('./upscale.js');
   const p = state.placement;
   const v = visibleSourceRect(p, state.img, state.out);
   if (!v) return;
@@ -207,21 +207,22 @@ async function enhance() {
   fg.height = Math.max(1, Math.round(rect.h * p.scale));
 
   showBusy('AIの準備中…');
-  const up = await loadUpscaler({
-    onProgress: (got, total) => showBusy(`AIデータを読み込み中（初回のみ）… ${(got / 1e6).toFixed(0)}${total ? ` / ${(total / 1e6).toFixed(0)}` : ''} MB`, total ? got / total : 0),
-  });
-  state.backend = up.backend;
-  const t0 = performance.now();
-  showBusy('AIで高画質化しています…', 0);
-  await upscaleInto(up, input, fg.getContext('2d'), { x: 0, y: 0, w: fg.width, h: fg.height }, {
+  let t0 = 0; let lastI = 0;
+  const res = await upscaleRobust(input, fg.getContext('2d'), { x: 0, y: 0, w: fg.width, h: fg.height }, {
     signal: abort.signal,
+    onProgress: (got, total) => showBusy(`AIデータを読み込み中（初回のみ）… ${(got / 1e6).toFixed(0)}${total ? ` / ${(total / 1e6).toFixed(0)}` : ''} MB`, total ? got / total : 0),
+    onStatus: (text) => { showBusy(text, 0); t0 = 0; },
     onTile: (i, n) => {
+      if (!t0 || i < lastI) t0 = performance.now(); // やり直したときは計り直す
+      lastI = i;
       const sec = (performance.now() - t0) / 1000;
-      const left = Math.round((sec / i) * (n - i));
-      showBusy(`AIで高画質化しています… ${i} / ${n}（残り約${left}秒）`, i / n);
+      const left = i > 1 ? Math.round((sec / (i - 1)) * (n - i)) : null;
+      showBusy(`AIで高画質化しています… ${i} / ${n}` + (left != null ? `（残り約${left}秒）` : ''), i / n);
     },
   });
-  state.enhanced = { canvas: fg, rect, key, seconds: (performance.now() - t0) / 1000 };
+  state.backend = res.backend;
+  state.tile = res.tile;
+  state.enhanced = { canvas: fg, rect, key };
 }
 
 $('enhance').addEventListener('click', async () => {

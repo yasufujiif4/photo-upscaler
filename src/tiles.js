@@ -59,3 +59,18 @@ export function chwToRgba(chw, cw, ch, r) {
   }
   return out;
 }
+
+/**
+ * Real-ESRGAN x4plus で一番大きくなる中間データ（4倍の大きさ×64層、float32）のバイト数。
+ * WebGPU はこれが1つのデータの上限を超えると失敗する。
+ */
+export function peakBufferBytes(tile, pad, scale = 4, channels = 64) {
+  const side = (tile + 2 * pad) * scale;
+  return side * side * channels * 4;
+}
+
+/** 上限 limitBytes に収まる、一番大きなタイル（候補から選ぶ）。どれも収まらなければ最小の候補 */
+export function pickTileSize(limitBytes, pad = 16, candidates = [256, 192, 160, 128, 96, 64, 48]) {
+  for (const t of candidates) if (peakBufferBytes(t, pad) <= limitBytes * 0.9) return t;
+  return candidates[candidates.length - 1];
+}
