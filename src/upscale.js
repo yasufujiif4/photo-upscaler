@@ -1,5 +1,6 @@
 // Real-ESRGAN x4plus（ONNX Runtime Web、WebGPU／だめなら WASM）を別スレッドで動かす
 import { planTiles, rgbaToChw, chwToRgba, pickTileSize, isBadOutput } from './tiles.js';
+import { AiWorker } from './ai-client.js';
 
 export const MODEL_URL = new URL('../models/realesrgan-x4plus.onnx', import.meta.url).href;
 const SCALE = 4;
@@ -31,28 +32,16 @@ export function loadUpscaler({ onProgress, preferWasm = false } = {}) {
   if (upscalerPromise && workerWasm !== preferWasm) resetUpscaler();
   if (!upscalerPromise) {
     workerWasm = preferWasm;
-    upscalerPromise = new Promise((resolve, reject) => {
-      worker = new Worker(new URL('./ai-worker.js', import.meta.url), { type: 'module' });
-      const pending = new Map();
-      let nextId = 1;
-      const run = (data, w, h) => new Promise((res, rej) => {
-        const id = nextId++;
-        pending.set(id, { res, rej });
-        worker.postMessage({ type: 'run', id, data, w, h }, [data.buffer]);
-      });
-      worker.onmessage = ({ data: m }) => {
-        if (m.type === 'progress') onProgress?.(m.got, m.total);
-        else if (m.type === 'ready') resolve({ backend: m.backend, gpuLimit: m.gpuLimit, run });
-        else if (m.type === 'result') { pending.get(m.id)?.res(m); pending.delete(m.id); }
-        else if (m.type === 'error') {
-          if (m.id && pending.has(m.id)) { pending.get(m.id).rej(new Error(m.message)); pending.delete(m.id); }
-          else reject(new Error(m.message));
-        }
-      };
-      worker.onerror = (e) => reject(new Error(e.message || 'AIの準備に失敗しました'));
-      const debug = new URLSearchParams(location.search).get('debug');
-      worker.postMessage({ type: 'load', url: MODEL_URL, preferWasm, debug });
-    });
+    const w = (worker = new AiWorker());
+    const debug = new URLSearchParams(location.search).get('debug');
+    upscalerPromise = w.load('esrgan', [MODEL_URL], { preferWasm, onProgress, totalHint: 66903103, debug }).then((info) => ({
+      backend: info.backend,
+      gpuLimit: info.gpuLimit,
+      run: async (data, iw, ih) => {
+        const { output } = await w.run('esrgan', { input: { data, dims: [1, 3, ih, iw] } });
+        return { data: output.data, w: output.dims[3], h: output.dims[2] };
+      },
+    }));
     upscalerPromise.catch(() => { upscalerPromise = null; });
   }
   return upscalerPromise;

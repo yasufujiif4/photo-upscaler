@@ -78,7 +78,8 @@ function updateInfo() {
     `元画像 ${state.img.w}×${state.img.h} ／ 書き出し ${s.label} ${state.out.w}×${state.out.h} ／ ` +
     `拡大率 ×${mag.toFixed(2)}（実質 ${effDpi}dpi）` + (v ? '' : ' ／ 画像が枠の外です') +
     (state.backend ? ` ／ AI：${state.backend === 'webgpu' ? 'GPU' : `CPU×${self.crossOriginIsolated ? Math.min(4, navigator.hardwareConcurrency || 1) : 1}`}（${state.tile}）` : '');
-  $('status').textContent = currentEnhanced() ? 'AI処理済み' : state.enhanced ? '位置や設定が変わりました。もう一度「AIで高画質化」を押してください' : '';
+  const ce = currentEnhanced();
+  $('status').textContent = ce ? `AI処理済み${ce.faces ? (ce.faceApplied ? `（顔補正：${ce.faceCount}人）` : '（顔補正なし）') : ''}` : state.enhanced ? '位置や設定が変わりました。もう一度「AIで高画質化」を押してください' : '';
   $('enhance').disabled = state.busy || !state.src || !v || !!currentEnhanced();
 }
 
@@ -242,7 +243,65 @@ async function enhance() {
   });
   state.backend = res.backend;
   state.tile = res.tile;
-  state.enhanced = { canvas: fg, rect, key };
+
+  // 顔補正の前の画像を取っておく（強さを変えたときに、ここから作り直す）
+  const base = document.createElement('canvas');
+  base.width = fg.width; base.height = fg.height;
+  base.getContext('2d', { willReadFrequently: true }).drawImage(fg, 0, 0);
+  state.enhanced = { canvas: fg, base, rect, key, faces: null, scale: p.scale };
+  if ($('faceOn').checked) await applyFaces();
+}
+
+/** 顔補正：初回は顔を探して切り出し、そのあとは強さだけ変えて作り直す */
+async function applyFaces() {
+  const e = state.enhanced;
+  if (!e) return;
+  const { loadFaceAi, findFaces, alignFace, restoreFace, pasteFace } = await import('./face.js');
+  showBusy('顔補正のAIを準備しています…');
+  const ai = await loadFaceAi({
+    onProgress: (got, total) => showBusy(`顔補正のAIデータを読み込み中（初回のみ）… ${(got / 1e6).toFixed(0)} / ${(total / 1e6).toFixed(0)} MB`, got / total),
+  });
+  if (abort?.signal.aborted) throw new DOMException('中止しました', 'AbortError');
+  if (!e.faces) {
+    showBusy('顔を探しています…');
+    await ensureSrc();
+    const found = await findFaces(ai, state.src, e.rect);
+    e.faces = found.map((f) => ({ ...alignFace(state.src, f.pts), score: f.score, restored: null, w: null }));
+  }
+  const w = Number($('fidelity').value);
+  const ctx = e.canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(e.base, 0, 0);
+  // 元の写真→前景キャンバス
+  const toDst = [e.scale, 0, 0, e.scale, -e.rect.x * e.scale, -e.rect.y * e.scale];
+  for (let i = 0; i < e.faces.length; i++) {
+    if (abort?.signal.aborted) throw new DOMException('中止しました', 'AbortError');
+    const f = e.faces[i];
+    if (f.w !== w) {
+      showBusy(`顔を補正しています… ${i + 1} / ${e.faces.length}`, i / e.faces.length);
+      f.restored = await restoreFace(ai, f.chw, w);
+      f.w = w;
+    }
+    pasteFace(ctx, f.restored, f.M, toDst);
+  }
+  e.faceCount = e.faces.length;
+  e.faceApplied = true;
+}
+
+/** 顔補正だけをやり直す（強さを変えた・オン／オフを切り替えた） */
+async function redoFaces() {
+  const e = currentEnhanced();
+  if (!e || state.busy) return;
+  state.busy = true; abort = new AbortController();
+  try {
+    if ($('faceOn').checked) await applyFaces();
+    else { e.canvas.getContext('2d').drawImage(e.base, 0, 0); e.faceApplied = false; }
+  } catch (err) {
+    if (err.name !== 'AbortError') { console.error(err); alert(`顔補正に失敗しました：${err.message}`); }
+  } finally {
+    state.busy = false; abort = null;
+    $('busy').hidden = true;
+    draw();
+  }
 }
 
 $('enhance').addEventListener('click', async () => {
@@ -261,6 +320,9 @@ $('enhance').addEventListener('click', async () => {
   }
 });
 $('cancel').addEventListener('click', () => abort?.abort());
+$('fidelity').addEventListener('input', (e) => { $('fidelityValue').textContent = Number(e.target.value).toFixed(1); });
+$('fidelity').addEventListener('change', redoFaces);
+$('faceOn').addEventListener('change', redoFaces);
 $('shrink').addEventListener('change', draw);
 // 処理の方法（自動／GPU／CPU）は端末に覚えておく
 try { $('engine').value = localStorage.getItem('photo-upscaler-engine') || 'auto'; } catch { /* なし */ }

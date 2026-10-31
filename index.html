@@ -50,7 +50,13 @@
 
   <footer>
     <span><span id="status"></span><br><span id="info"></span></span>
-    <label class="check"><input id="guide" type="checkbox" checked> 端が切れる目安の線</label>
+    <span class="group">
+      <label class="check"><input id="faceOn" type="checkbox" checked> 顔を補正</label>
+      <label class="check slider">きれいさ
+        <input id="fidelity" type="range" min="0" max="1" step="0.1" value="0.7" aria-label="顔補正の本人らしさ（0＝きれいさ優先、1＝本人らしさ優先）">
+        本人らしさ <output id="fidelityValue">0.7</output></label>
+      <label class="check"><input id="guide" type="checkbox" checked> 端が切れる目安の線</label>
+    </span>
   </footer>
 
   <script type="module" src="src/app.js"></script>
